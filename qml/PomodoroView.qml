@@ -232,6 +232,130 @@ Page {
             }
         }
 
+        // Study music: pick a saved Music Link, manage the saved list, adjust volume
+        Pane {
+            Layout.preferredWidth: parent.width * 0.65
+            Layout.alignment: Qt.AlignHCenter
+            Material.elevation: 4
+            Material.roundedScale: Material.MediumScale
+
+            background: Rectangle {
+                color: "white"
+                radius: 24
+            }
+
+            ColumnLayout {
+                width: parent.width
+                spacing: 10
+
+                Label {
+                    text: "Study Music"
+                    font.pixelSize: 18
+                    font.weight: Font.Medium
+                    font.family: fredoka.name
+                    color: "#333333"
+                }
+
+                Label {
+                    visible: musicLinkManager.count === 0
+                    text: "No Music Links saved yet — add one below, or start with none for silence."
+                    font.pixelSize: 12
+                    font.family: fredoka.name
+                    color: "#777777"
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+
+                ListView {
+                    id: musicLinkList
+                    visible: musicLinkManager.count > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: Math.min(musicLinkManager.count, 4) * 40
+                    clip: true
+                    model: musicLinkManager
+
+                    delegate: RowLayout {
+                        width: musicLinkList.width
+                        spacing: 8
+
+                        RadioButton {
+                            // checkable: false stops RadioButton's own click handling from
+                            // overwriting `checked` with a literal value, which would
+                            // otherwise permanently break this declarative binding after
+                            // the first click. clicked() still fires either way.
+                            checkable: false
+                            checked: model.id === musicLinkManager.selectedLinkId
+                            onClicked: musicLinkManager.selectedLinkId = model.id
+                        }
+
+                        Label {
+                            text: model.label
+                            font.family: fredoka.name
+                            font.pixelSize: 14
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Button {
+                            text: "Remove"
+                            flat: true
+                            font.pixelSize: 12
+                            font.family: fredoka.name
+                            onClicked: musicLinkManager.removeMusicLink(index)
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    TextField {
+                        id: newLinkLabel
+                        placeholderText: "Label (e.g. Lo-fi beats)"
+                        font.family: fredoka.name
+                        Layout.preferredWidth: 160
+                    }
+
+                    TextField {
+                        id: newLinkUrl
+                        placeholderText: "YouTube link"
+                        font.family: fredoka.name
+                        Layout.fillWidth: true
+                    }
+
+                    Button {
+                        text: "Add"
+                        font.family: fredoka.name
+                        onClicked: {
+                            musicLinkManager.addMusicLink(newLinkLabel.text, newLinkUrl.text)
+                            newLinkLabel.text = ""
+                            newLinkUrl.text = ""
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Label {
+                        text: "Volume"
+                        font.family: fredoka.name
+                        font.pixelSize: 14
+                    }
+
+                    Slider {
+                        Layout.fillWidth: true
+                        from: 0.0
+                        to: 1.0
+                        value: musicLinkManager.volume
+                        onMoved: musicLinkManager.volume = value
+                    }
+                }
+            }
+        }
+
         // Back button with spacing
         Item {
             Layout.preferredHeight: 16

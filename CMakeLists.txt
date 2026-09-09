@@ -33,6 +33,7 @@ qt_add_qml_module(applemonStudys
         RESOURCES assets/images/exiticon.png
         SOURCES src/core/streaks/streaksmanager.h src/core/streaks/streaksmanager.cpp
         SOURCES src/core/todo/todomanager.h src/core/todo/todomanager.cpp
+        SOURCES src/core/music/musiclinkmanager.h src/core/music/musiclinkmanager.cpp
 )
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -86,6 +87,23 @@ target_link_libraries(streaksmanager_tests
         Qt6::Sql
 )
 add_test(NAME streaksmanager_tests COMMAND streaksmanager_tests)
+
+qt_add_executable(musiclinkmanager_tests
+    tests/test_musicLinkManager.cpp
+    src/core/music/musiclinkmanager.cpp
+    src/core/music/musiclinkmanager.h
+    src/core/pomodoro/pomodorotimer.cpp
+    src/core/pomodoro/pomodorotimer.h
+    src/core/database/databasemanager.cpp
+    src/core/database/databasemanager.h
+)
+target_link_libraries(musiclinkmanager_tests
+    PRIVATE
+        Qt6::Test
+        Qt6::Core
+        Qt6::Sql
+)
+add_test(NAME musiclinkmanager_tests COMMAND musiclinkmanager_tests)
 
 include(GNUInstallDirs)
 install(TARGETS applemonStudys

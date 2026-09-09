@@ -138,3 +138,108 @@ bool DatabaseManager::deleteStreak(int id)
     query.bindValue(":id", id);
     return query.exec();
 }
+
+// ---------------------------------------------------------------------------
+// Music Links feature
+// ---------------------------------------------------------------------------
+
+bool DatabaseManager::createMusicTables()
+{
+    QSqlQuery query;
+
+    if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS music_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            url TEXT NOT NULL
+        )
+    )")) {
+        qDebug() << "Error creating music_links table:" << query.lastError().text();
+        return false;
+    }
+
+    if (!query.exec(R"(
+        CREATE TABLE IF NOT EXISTS music_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            selected_link_id INTEGER NOT NULL DEFAULT -1,
+            volume REAL NOT NULL DEFAULT 0.5
+        )
+    )")) {
+        qDebug() << "Error creating music_settings table:" << query.lastError().text();
+        return false;
+    }
+
+    // Ensure the single settings row exists.
+    if (!query.exec("INSERT OR IGNORE INTO music_settings (id, selected_link_id, volume) VALUES (1, -1, 0.5)")) {
+        qDebug() << "Error seeding music_settings row:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+bool DatabaseManager::addMusicLink(const QString &label, const QString &url)
+{
+    QSqlQuery query;
+    query.prepare("INSERT INTO music_links (label, url) VALUES (:label, :url)");
+    query.bindValue(":label", label);
+    query.bindValue(":url", url);
+    if (!query.exec()) {
+        qDebug() << "Error adding music link:" << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+bool DatabaseManager::removeMusicLink(int id)
+{
+    QSqlQuery query;
+    query.prepare("DELETE FROM music_links WHERE id = :id");
+    query.bindValue(":id", id);
+    if (!query.exec()) {
+        qDebug() << "Error removing music link:" << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QVector<QVariantMap> DatabaseManager::loadMusicLinks()
+{
+    QVector<QVariantMap> links;
+    QSqlQuery query("SELECT id, label, url FROM music_links ORDER BY id");
+    while (query.next()) {
+        QVariantMap link;
+        link["id"] = query.value(0).toInt();
+        link["label"] = query.value(1).toString();
+        link["url"] = query.value(2).toString();
+        links.append(link);
+    }
+    return links;
+}
+
+bool DatabaseManager::saveMusicSettings(int selectedLinkId, qreal volume)
+{
+    QSqlQuery query;
+    query.prepare("UPDATE music_settings SET selected_link_id = :selected_link_id, volume = :volume WHERE id = 1");
+    query.bindValue(":selected_link_id", selectedLinkId);
+    query.bindValue(":volume", volume);
+    if (!query.exec()) {
+        qDebug() << "Error saving music settings:" << query.lastError().text();
+        return false;
+    }
+    return true;
+}
+
+QVariantMap DatabaseManager::loadMusicSettings()
+{
+    QVariantMap settings;
+    settings["selectedLinkId"] = -1;
+    settings["volume"] = 0.5;
+
+    QSqlQuery query("SELECT selected_link_id, volume FROM music_settings WHERE id = 1");
+    if (query.next()) {
+        settings["selectedLinkId"] = query.value(0).toInt();
+        settings["volume"] = query.value(1).toDouble();
+    }
+    return settings;
+}

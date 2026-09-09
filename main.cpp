@@ -6,6 +6,7 @@
 #include "src/core/database/databasemanager.h"
 #include "src/core/todo/todomanager.h"
 #include "src/core/streaks/streaksmanager.h"
+#include "src/core/music/musiclinkmanager.h"
 
 int main(int argc, char *argv[])
 {
@@ -30,6 +31,11 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    if (!dbManager.createMusicTables()) {
+        qDebug() << "Failed to create music tables!";
+        return -1;
+    }
+
     // Register QML types
     qmlRegisterType<PomodoroTimer>("MyPomodoro", 1, 0, "PomodoroTimer");
     qmlRegisterType<TodoItem>("MyTodo", 1, 0, "TodoItem");
@@ -40,6 +46,7 @@ int main(int argc, char *argv[])
     todoManager *todoModel = new todoManager(&app);
     streaksManager *streaksModel = new streaksManager(&app);
     PomodoroTimer *pomodoroTimer = new PomodoroTimer(&app);
+    MusicLinkManager *musicLinkManager = new MusicLinkManager(pomodoroTimer, &app);
 
     QQmlApplicationEngine engine;
 
@@ -47,6 +54,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("todoModelInstance", todoModel);
     engine.rootContext()->setContextProperty("streaksModelInstance", streaksModel);
     engine.rootContext()->setContextProperty("pomodoroTimer",pomodoroTimer);
+    engine.rootContext()->setContextProperty("musicLinkManager", musicLinkManager);
 
     // Handle creation failures
     QObject::connect(

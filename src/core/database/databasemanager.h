@@ -7,6 +7,7 @@
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDebug>
+#include <QVariantMap>
 
 class DatabaseManager : public QObject
 {
@@ -24,6 +25,16 @@ public:
     Q_INVOKABLE QVector<QVariantMap> loadAllStreaks();
     Q_INVOKABLE bool updateStreak(int id, const QString &title, int streakDuration, int bestStreak, const QDateTime &lastActivity);
     Q_INVOKABLE bool deleteStreak(int id);
+
+    // Music Links feature
+    bool createMusicTables();
+
+    bool addMusicLink(const QString &label, const QString &url);
+    bool removeMusicLink(int id);
+    QVector<QVariantMap> loadMusicLinks();
+
+    bool saveMusicSettings(int selectedLinkId, qreal volume);
+    QVariantMap loadMusicSettings();
 
 private:
     explicit DatabaseManager(QObject *parent = nullptr);
