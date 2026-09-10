@@ -6,6 +6,8 @@
 #include "../src/core/music/musiclinkmanager.h"
 #include "../src/core/pomodoro/pomodorotimer.h"
 #include "../src/core/database/databasemanager.h"
+#include "fakemusiclinkresolver.h"
+#include "fakemusicplayer.h"
 
 class TestMusicLinkManager : public QObject
 {
@@ -29,10 +31,27 @@ private slots:
     void testDatabasePersistence();
     void testSelectedLinkResetIfMissingOnLoad();
 
+    void testNoSelectionMeansNoPlaybackOnWorking();
+    void testSingleEntryPlaysOnWorkingAndLoopsOnFinish();
+    void testSingleEntryRetryThenSilentError();
+    void testPlaylistAdvancesToNextEntryOnFinish();
+    void testPlaylistLoopsBackToFirstEntry();
+    void testPlaylistSkipsBrokenMidEntry();
+    void testPlaylistGoesSilentWhenAllEntriesFail();
+    void testPauseResumeStopMirrorToPlayer();
+    void testStopClearsPlayingState();
+    void testStopClearsPlaybackError();
+    void testPauseResumeAreNoOpsWhenNotPlaying();
+    void testUnresolvableMusicLinkShowsError();
+    void testRepeatedPlaybackErrorsEventuallyStopWithError();
+
 private:
     void clearDatabase();
+    void selectSingleLink(const QString &url);
     PomodoroTimer *m_pomodoro;
     MusicLinkManager *m_manager;
+    FakeMusicLinkResolver *m_resolver;
+    FakeMusicPlayer *m_player;
 };
 
 void TestMusicLinkManager::initTestCase()
@@ -64,13 +83,19 @@ void TestMusicLinkManager::init()
     clearDatabase();
 
     m_pomodoro = new PomodoroTimer(this);
-    m_manager = new MusicLinkManager(m_pomodoro, this);
+    m_resolver = new FakeMusicLinkResolver();
+    m_player = new FakeMusicPlayer();
+    m_manager = new MusicLinkManager(m_pomodoro, m_resolver, m_player, this);
 }
 
 void TestMusicLinkManager::cleanup()
 {
     delete m_manager;
     m_manager = nullptr;
+    delete m_player;
+    m_player = nullptr;
+    delete m_resolver;
+    m_resolver = nullptr;
     delete m_pomodoro;
     m_pomodoro = nullptr;
 }
@@ -81,6 +106,16 @@ void TestMusicLinkManager::clearDatabase()
     query.exec("DELETE FROM music_links");
     query.exec("DELETE FROM sqlite_sequence WHERE name='music_links'");
     query.exec("UPDATE music_settings SET selected_link_id = -1, volume = 0.5 WHERE id = 1");
+}
+
+// Adds a single Music Link with the given url, selects it, and returns once
+// selection has taken effect - used by playback tests that don't care about
+// CRUD details, only about what happens once something is selected.
+void TestMusicLinkManager::selectSingleLink(const QString &url)
+{
+    m_manager->addMusicLink("Test Link", url);
+    const int id = m_manager->data(m_manager->index(0, 0), MusicLinkManager::IdRole).toInt();
+    m_manager->selectMusicLink(id);
 }
 
 void TestMusicLinkManager::testConstructor()
@@ -171,6 +206,8 @@ void TestMusicLinkManager::testVolume()
 
     m_manager->setVolume(-0.2); // clamps
     QCOMPARE(m_manager->volume(), 0.0);
+
+    QCOMPARE(m_player->lastVolume, 0.0);
 }
 
 void TestMusicLinkManager::testRoleNames()
@@ -271,6 +308,214 @@ void TestMusicLinkManager::testSelectedLinkResetIfMissingOnLoad()
     MusicLinkManager manager2(&pomodoro2, this);
 
     QCOMPARE(manager2.selectedLinkId(), -1);
+}
+
+void TestMusicLinkManager::testNoSelectionMeansNoPlaybackOnWorking()
+{
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(!m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls.count(), 0);
+}
+
+void TestMusicLinkManager::testSingleEntryPlaysOnWorkingAndLoopsOnFinish()
+{
+    selectSingleLink("https://youtube.com/watch?v=solo");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(m_manager->isPlaying());
+    QCOMPARE(m_manager->currentEntryUrl(), QString("https://youtube.com/watch?v=solo"));
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"https://youtube.com/watch?v=solo"}));
+
+    // The single entry finishing before the session does loops it again.
+    m_player->simulateFinished();
+
+    QVERIFY(m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls,
+             QStringList({"https://youtube.com/watch?v=solo", "https://youtube.com/watch?v=solo"}));
+}
+
+void TestMusicLinkManager::testSingleEntryRetryThenSilentError()
+{
+    selectSingleLink("https://youtube.com/watch?v=broken");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=broken"] = {"https://youtube.com/watch?v=broken"};
+    // First attempt and the retry both fail - no other entry to fall back to.
+    m_resolver->outcomesByEntry["https://youtube.com/watch?v=broken"] = {false, false};
+
+    QSignalSpy errorSpy(m_manager, &MusicLinkManager::playbackErrorChanged);
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(!m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls.count(), 0);
+    QCOMPARE(m_resolver->resolveCallCount, 2); // initial attempt + one retry
+    QVERIFY(!m_manager->playbackError().isEmpty());
+    QVERIFY(errorSpy.count() >= 1);
+}
+
+void TestMusicLinkManager::testPlaylistAdvancesToNextEntryOnFinish()
+{
+    selectSingleLink("https://youtube.com/playlist?list=abc");
+    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB", "entryC"};
+
+    m_pomodoro->startSession(60, 10);
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryA"));
+
+    m_player->simulateFinished();
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA", "entryB"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryB"));
+
+    m_player->simulateFinished();
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA", "entryB", "entryC"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryC"));
+}
+
+void TestMusicLinkManager::testPlaylistLoopsBackToFirstEntry()
+{
+    selectSingleLink("https://youtube.com/playlist?list=abc");
+    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB"};
+
+    m_pomodoro->startSession(60, 10);
+    m_player->simulateFinished(); // -> entryB
+    m_player->simulateFinished(); // -> should loop back to entryA
+
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA", "entryB", "entryA"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryA"));
+    QVERIFY(m_manager->isPlaying());
+}
+
+void TestMusicLinkManager::testPlaylistSkipsBrokenMidEntry()
+{
+    selectSingleLink("https://youtube.com/playlist?list=abc");
+    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB", "entryC"};
+    // entryB fails both its initial attempt and its retry.
+    m_resolver->outcomesByEntry["entryB"] = {false, false};
+
+    m_pomodoro->startSession(60, 10);
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA"}));
+
+    // entryA finishes; entryB is tried and fails twice, so entryC plays instead.
+    m_player->simulateFinished();
+
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA", "entryC"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryC"));
+    QVERIFY(m_manager->isPlaying());
+    QVERIFY(m_manager->playbackError().isEmpty()); // a mid-playlist skip is silent, not an error
+}
+
+void TestMusicLinkManager::testPlaylistGoesSilentWhenAllEntriesFail()
+{
+    selectSingleLink("https://youtube.com/playlist?list=abc");
+    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB"};
+    m_resolver->outcomesByEntry["entryA"] = {false, false};
+    m_resolver->outcomesByEntry["entryB"] = {false, false};
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(!m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls.count(), 0);
+    // A fully-broken playlist falls silent without surfacing a repeated (or any) error.
+    QVERIFY(m_manager->playbackError().isEmpty());
+}
+
+void TestMusicLinkManager::testPauseResumeStopMirrorToPlayer()
+{
+    selectSingleLink("https://youtube.com/watch?v=solo");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    m_pomodoro->startSession(60, 10);
+
+    m_manager->pause();
+    QCOMPARE(m_player->pauseCallCount, 1);
+
+    m_manager->resume();
+    QCOMPARE(m_player->resumeCallCount, 1);
+
+    // PomodoroTimer::startSession() internally calls stop() before
+    // transitioning to Working, so the player may already have seen a
+    // (harmless, no-op) stop() call by this point - only assert on the
+    // increment caused by this explicit manual Stop.
+    const int stopCallCountBeforeStop = m_player->stopCallCount;
+    m_pomodoro->stop(); // manual Stop -> Idle
+    QCOMPARE(m_player->stopCallCount, stopCallCountBeforeStop + 1);
+    QVERIFY(!m_manager->isPlaying());
+}
+
+void TestMusicLinkManager::testStopClearsPlayingState()
+{
+    selectSingleLink("https://youtube.com/watch?v=solo");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    m_pomodoro->startSession(60, 10);
+    QVERIFY(m_manager->isPlaying());
+
+    m_pomodoro->stop();
+
+    QVERIFY(!m_manager->isPlaying());
+    QCOMPARE(m_manager->currentEntryUrl(), QString());
+}
+
+void TestMusicLinkManager::testStopClearsPlaybackError()
+{
+    selectSingleLink("https://youtube.com/watch?v=broken");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=broken"] = {"https://youtube.com/watch?v=broken"};
+    m_resolver->outcomesByEntry["https://youtube.com/watch?v=broken"] = {false, false};
+
+    m_pomodoro->startSession(60, 10);
+    QVERIFY(!m_manager->playbackError().isEmpty());
+
+    m_pomodoro->stop();
+
+    QVERIFY(m_manager->playbackError().isEmpty());
+}
+
+void TestMusicLinkManager::testPauseResumeAreNoOpsWhenNotPlaying()
+{
+    // Nothing selected, no session started - pause/resume must not reach the player.
+    m_manager->pause();
+    m_manager->resume();
+    QCOMPARE(m_player->pauseCallCount, 0);
+    QCOMPARE(m_player->resumeCallCount, 0);
+
+    // Same after a session ends (Idle): resume() must not resurrect stale audio.
+    selectSingleLink("https://youtube.com/watch?v=solo");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    m_pomodoro->startSession(60, 10);
+    m_pomodoro->stop();
+
+    m_manager->resume();
+    QCOMPARE(m_player->resumeCallCount, 0);
+}
+
+void TestMusicLinkManager::testUnresolvableMusicLinkShowsError()
+{
+    selectSingleLink("https://youtube.com/playlist?list=dead");
+    // No entriesByUrl configured for this url - fetchEntries() returns empty,
+    // simulating a Music Link that can't be resolved at all (dead/private link).
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(!m_manager->isPlaying());
+    QVERIFY(!m_manager->playbackError().isEmpty());
+}
+
+void TestMusicLinkManager::testRepeatedPlaybackErrorsEventuallyStopWithError()
+{
+    // Resolves fine every time, but the stream itself never actually plays
+    // (e.g. bad codec) - errorOccurred() fires instead of finished().
+    selectSingleLink("https://youtube.com/watch?v=unplayable");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=unplayable"] = {"https://youtube.com/watch?v=unplayable"};
+
+    m_pomodoro->startSession(60, 10);
+    QVERIFY(m_manager->isPlaying());
+
+    // Keep failing well past any reasonable retry budget.
+    for (int i = 0; i < 10 && m_manager->isPlaying(); ++i)
+        m_player->simulateError();
+
+    QVERIFY(!m_manager->isPlaying());
+    QVERIFY(!m_manager->playbackError().isEmpty());
 }
 
 QTEST_MAIN(TestMusicLinkManager)

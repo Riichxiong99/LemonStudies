@@ -197,7 +197,10 @@ Page {
                 Layout.preferredWidth: 120
                 Layout.preferredHeight: 48
                 Material.background: "white"
-                onClicked: pomodoroTimer.pause()
+                onClicked: {
+                    pomodoroTimer.pause()
+                    musicLinkManager.pause()
+                }
                 font.family: fredoka.name
                 layer.enabled: true
                 layer.effect: MultiEffect {
@@ -217,7 +220,10 @@ Page {
                 Layout.preferredWidth: 120
                 Layout.preferredHeight: 48
                 Material.background: "white"
-                onClicked: pomodoroTimer.resume()
+                onClicked: {
+                    pomodoroTimer.resume()
+                    musicLinkManager.resume()
+                }
                 font.family: fredoka.name
 
                 layer.enabled: true
@@ -262,6 +268,16 @@ Page {
                     font.pixelSize: 12
                     font.family: fredoka.name
                     color: "#777777"
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+
+                Label {
+                    visible: musicLinkManager.playbackError.length > 0
+                    text: musicLinkManager.playbackError
+                    font.pixelSize: 12
+                    font.family: fredoka.name
+                    color: "#B00020"
                     wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }

@@ -4,7 +4,7 @@ project(lemonStudys VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Sql Test)
+find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 Sql Test Multimedia)
 
 qt_standard_project_setup(REQUIRES 6.5)
 
@@ -34,6 +34,10 @@ qt_add_qml_module(applemonStudys
         SOURCES src/core/streaks/streaksmanager.h src/core/streaks/streaksmanager.cpp
         SOURCES src/core/todo/todomanager.h src/core/todo/todomanager.cpp
         SOURCES src/core/music/musiclinkmanager.h src/core/music/musiclinkmanager.cpp
+        SOURCES src/core/music/musiclinkresolver.h
+        SOURCES src/core/music/musicplayer.h
+        SOURCES src/core/music/ytdlpmusiclinkresolver.h src/core/music/ytdlpmusiclinkresolver.cpp
+        SOURCES src/core/music/qtmediamusicplayer.h src/core/music/qtmediamusicplayer.cpp
 )
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -52,6 +56,7 @@ target_link_libraries(applemonStudys
         Qt6::Quick
         Qt6::QuickControls2
         Qt6::Sql
+        Qt6::Multimedia
 )
 
 qt_add_executable(streaks_tests
@@ -90,8 +95,16 @@ add_test(NAME streaksmanager_tests COMMAND streaksmanager_tests)
 
 qt_add_executable(musiclinkmanager_tests
     tests/test_musicLinkManager.cpp
+    tests/fakemusiclinkresolver.h
+    tests/fakemusicplayer.h
     src/core/music/musiclinkmanager.cpp
     src/core/music/musiclinkmanager.h
+    src/core/music/musiclinkresolver.h
+    src/core/music/musicplayer.h
+    src/core/music/ytdlpmusiclinkresolver.cpp
+    src/core/music/ytdlpmusiclinkresolver.h
+    src/core/music/qtmediamusicplayer.cpp
+    src/core/music/qtmediamusicplayer.h
     src/core/pomodoro/pomodorotimer.cpp
     src/core/pomodoro/pomodorotimer.h
     src/core/database/databasemanager.cpp
@@ -102,6 +115,7 @@ target_link_libraries(musiclinkmanager_tests
         Qt6::Test
         Qt6::Core
         Qt6::Sql
+        Qt6::Multimedia
 )
 add_test(NAME musiclinkmanager_tests COMMAND musiclinkmanager_tests)
 

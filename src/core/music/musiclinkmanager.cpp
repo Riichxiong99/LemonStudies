@@ -1,17 +1,51 @@
 #include "musiclinkmanager.h"
 #include "../database/databasemanager.h"
+#include "ytdlpmusiclinkresolver.h"
+#include "qtmediamusicplayer.h"
 
 #include <QSqlQuery>
 #include <algorithm>
 
 MusicLinkManager::MusicLinkManager(PomodoroTimer *pomodoro, QObject *parent)
+    : MusicLinkManager(pomodoro, new YtDlpMusicLinkResolver(), new QtMediaMusicPlayer(), parent)
+{
+    m_ownsResolver = true;
+    m_ownsPlayer = true;
+}
+
+MusicLinkManager::MusicLinkManager(PomodoroTimer *pomodoro, MusicLinkResolver *resolver, MusicPlayer *player,
+                                    QObject *parent)
     : QAbstractListModel(parent),
     m_pomodoro(pomodoro),
     m_selectedLinkId(-1),
-    m_volume(0.5)
+    m_volume(0.5),
+    m_resolver(resolver),
+    m_player(player),
+    m_ownsResolver(false),
+    m_ownsPlayer(false),
+    m_currentEntryIndex(-1),
+    m_playing(false),
+    m_consecutivePlaybackErrors(0)
 {
     DatabaseManager::instance().createMusicTables();
     loadFromDatabase();
+
+    if (m_player) {
+        m_player->setVolume(m_volume);
+        connect(m_player, &MusicPlayer::finished, this, &MusicLinkManager::onEntryFinished);
+        connect(m_player, &MusicPlayer::errorOccurred, this, &MusicLinkManager::onEntryPlaybackError);
+    }
+
+    if (m_pomodoro)
+        connect(m_pomodoro, &PomodoroTimer::stateChanged, this, &MusicLinkManager::onPomodoroStateChanged);
+}
+
+MusicLinkManager::~MusicLinkManager()
+{
+    if (m_ownsPlayer)
+        delete m_player;
+    if (m_ownsResolver)
+        delete m_resolver;
 }
 
 int MusicLinkManager::rowCount(const QModelIndex &parent) const
@@ -130,6 +164,8 @@ void MusicLinkManager::setVolume(qreal volume)
         return;
 
     m_volume = clamped;
+    if (m_player)
+        m_player->setVolume(m_volume);
     persistSettings();
     emit volumeChanged();
 }
@@ -165,4 +201,192 @@ void MusicLinkManager::loadFromDatabase()
 void MusicLinkManager::persistSettings()
 {
     DatabaseManager::instance().saveMusicSettings(m_selectedLinkId, m_volume);
+}
+
+bool MusicLinkManager::isPlaying() const
+{
+    return m_playing;
+}
+
+QString MusicLinkManager::currentEntryUrl() const
+{
+    return m_currentEntryUrl;
+}
+
+QString MusicLinkManager::playbackError() const
+{
+    return m_playbackError;
+}
+
+void MusicLinkManager::pause()
+{
+    // Guarded on m_playing (not just m_player) so a stray Pause/Resume click
+    // outside an active session - before Start, or after everything has
+    // already stopped/gone silent - can't reach into the player at all.
+    if (m_playing && m_player)
+        m_player->pause();
+}
+
+void MusicLinkManager::resume()
+{
+    if (m_playing && m_player)
+        m_player->resume();
+}
+
+void MusicLinkManager::setPlaying(bool playing)
+{
+    if (m_playing == playing)
+        return;
+    m_playing = playing;
+    emit playingChanged();
+}
+
+void MusicLinkManager::setCurrentEntryUrl(const QString &url)
+{
+    if (m_currentEntryUrl == url)
+        return;
+    m_currentEntryUrl = url;
+    emit currentEntryChanged();
+}
+
+void MusicLinkManager::setPlaybackError(const QString &message)
+{
+    if (m_playbackError == message)
+        return;
+    m_playbackError = message;
+    emit playbackErrorChanged();
+}
+
+void MusicLinkManager::onPomodoroStateChanged(PomodoroTimer::State state)
+{
+    if (state == PomodoroTimer::Working)
+        startPlayback();
+    else if (state == PomodoroTimer::Idle)
+        stopPlayback();
+    // OnBreak: no reaction - music keeps playing through the break untouched.
+}
+
+void MusicLinkManager::startPlayback()
+{
+    setPlaybackError(QString());
+    m_entries.clear();
+    m_currentEntryIndex = -1;
+    m_consecutivePlaybackErrors = 0;
+
+    if (m_selectedLinkId == -1) {
+        setCurrentEntryUrl(QString());
+        setPlaying(false);
+        return;
+    }
+
+    QString selectedUrl;
+    for (const MusicLinkEntry &link : m_links) {
+        if (link.id == m_selectedLinkId) {
+            selectedUrl = link.url;
+            break;
+        }
+    }
+
+    m_entries = m_resolver ? m_resolver->fetchEntries(selectedUrl) : QVector<QString>();
+    if (m_entries.isEmpty()) {
+        setCurrentEntryUrl(QString());
+        setPlaying(false);
+        // The Music Link itself couldn't be resolved at all (dead/private
+        // playlist, network down) - distinct from "nothing selected", so say so.
+        setPlaybackError(tr("Couldn't play this Music Link."));
+        return;
+    }
+
+    tryPlayFromIndex(0);
+}
+
+void MusicLinkManager::stopPlayback()
+{
+    // Reset bookkeeping before touching the player, so a player that somehow
+    // reacts to stop() synchronously (e.g. emits finished()) can't re-enter
+    // this orchestration using half-cleared state.
+    m_entries.clear();
+    m_currentEntryIndex = -1;
+    m_consecutivePlaybackErrors = 0;
+    setCurrentEntryUrl(QString());
+    setPlaying(false);
+    setPlaybackError(QString());
+
+    if (m_player)
+        m_player->stop();
+}
+
+bool MusicLinkManager::tryPlayFromIndex(int startIndex)
+{
+    if (!m_resolver || !m_player || m_entries.isEmpty())
+        return false;
+
+    const int size = m_entries.size();
+    for (int i = 0; i < size; ++i) {
+        const int idx = (startIndex + i) % size;
+        const QString &entryUrl = m_entries.at(idx);
+
+        QString streamUrl = m_resolver->resolveStreamUrl(entryUrl);
+        if (streamUrl.isEmpty())
+            streamUrl = m_resolver->resolveStreamUrl(entryUrl); // silent retry-once
+
+        if (!streamUrl.isEmpty()) {
+            m_currentEntryIndex = idx;
+            setCurrentEntryUrl(entryUrl);
+            setPlaybackError(QString());
+            m_player->play(streamUrl);
+            setPlaying(true);
+            return true;
+        }
+    }
+
+    // Every entry failed. A single-entry Music Link (no other entry to fall
+    // back to) surfaces a one-time inline error; a genuine playlist just
+    // falls silent for the rest of the session - no error loop.
+    const bool wasSingleEntry = (size == 1);
+    m_entries.clear();
+    m_currentEntryIndex = -1;
+    setCurrentEntryUrl(QString());
+    setPlaying(false);
+    if (wasSingleEntry)
+        setPlaybackError(tr("Couldn't play this Music Link."));
+    return false;
+}
+
+void MusicLinkManager::skipToNextEntry()
+{
+    if (m_entries.isEmpty())
+        return;
+    const int nextIndex = (m_currentEntryIndex + 1) % m_entries.size();
+    tryPlayFromIndex(nextIndex);
+}
+
+void MusicLinkManager::onEntryFinished()
+{
+    // A natural end is a successful playback, however many prior entries
+    // were skipped for failing to resolve - reset the playback-error cap.
+    m_consecutivePlaybackErrors = 0;
+    skipToNextEntry();
+}
+
+void MusicLinkManager::onEntryPlaybackError()
+{
+    // Distinct from a resolve failure (already capped by trying every entry
+    // once in tryPlayFromIndex): this is a resolved stream that fails during
+    // actual playback. Without a cap, a stream that resolves fine but never
+    // plays (bad codec, DRM, ...) would resolve-and-play-and-fail forever.
+    ++m_consecutivePlaybackErrors;
+    if (m_consecutivePlaybackErrors > m_entries.size()) {
+        if (m_player)
+            m_player->stop();
+        m_entries.clear();
+        m_currentEntryIndex = -1;
+        m_consecutivePlaybackErrors = 0;
+        setCurrentEntryUrl(QString());
+        setPlaying(false);
+        setPlaybackError(tr("Playback kept failing; stopping music for this session."));
+        return;
+    }
+
+    skipToNextEntry();
 }
