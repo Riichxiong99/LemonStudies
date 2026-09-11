@@ -101,21 +101,19 @@ qt_add_executable(musiclinkmanager_tests
     src/core/music/musiclinkmanager.h
     src/core/music/musiclinkresolver.h
     src/core/music/musicplayer.h
-    src/core/music/ytdlpmusiclinkresolver.cpp
-    src/core/music/ytdlpmusiclinkresolver.h
-    src/core/music/qtmediamusicplayer.cpp
-    src/core/music/qtmediamusicplayer.h
     src/core/pomodoro/pomodorotimer.cpp
     src/core/pomodoro/pomodorotimer.h
     src/core/database/databasemanager.cpp
     src/core/database/databasemanager.h
 )
+# No Qt6::Multimedia and no yt-dlp/QMediaPlayer sources: this target exercises
+# playback orchestration against fakes, so it must not link - let alone open -
+# the real audio stack.
 target_link_libraries(musiclinkmanager_tests
     PRIVATE
         Qt6::Test
         Qt6::Core
         Qt6::Sql
-        Qt6::Multimedia
 )
 add_test(NAME musiclinkmanager_tests COMMAND musiclinkmanager_tests)
 

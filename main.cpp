@@ -7,6 +7,8 @@
 #include "src/core/todo/todomanager.h"
 #include "src/core/streaks/streaksmanager.h"
 #include "src/core/music/musiclinkmanager.h"
+#include "src/core/music/qtmediamusicplayer.h"
+#include "src/core/music/ytdlpmusiclinkresolver.h"
 
 int main(int argc, char *argv[])
 {
@@ -46,7 +48,11 @@ int main(int argc, char *argv[])
     todoManager *todoModel = new todoManager(&app);
     streaksManager *streaksModel = new streaksManager(&app);
     PomodoroTimer *pomodoroTimer = new PomodoroTimer(&app);
-    MusicLinkManager *musicLinkManager = new MusicLinkManager(pomodoroTimer, &app);
+    // Composed here, alongside every other manager, rather than inside
+    // MusicLinkManager: that keeps yt-dlp and QMediaPlayer out of everything
+    // that merely links the orchestration, tests included.
+    MusicLinkManager *musicLinkManager = new MusicLinkManager(
+        pomodoroTimer, new YtDlpMusicLinkResolver(&app), new QtMediaMusicPlayer(&app), &app);
 
     QQmlApplicationEngine engine;
 

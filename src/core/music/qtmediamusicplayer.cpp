@@ -1,5 +1,6 @@
 #include "qtmediamusicplayer.h"
 
+#include <QAudio>
 #include <QAudioOutput>
 #include <QDebug>
 #include <QUrl>
@@ -39,7 +40,12 @@ void QtMediaMusicPlayer::stop()
 
 void QtMediaMusicPlayer::setVolume(qreal volume)
 {
-    m_audioOutput->setVolume(volume);
+    // The incoming value comes straight off a UI slider, where the user
+    // expects the midpoint to sound like "half as loud". QAudioOutput takes a
+    // linear amplitude, in which 0.5 is only about -6 dB - perceptually closer
+    // to 3/4 volume, making the top half of the slider feel inert.
+    m_audioOutput->setVolume(
+        QAudio::convertVolume(volume, QAudio::LogarithmicVolumeScale, QAudio::LinearVolumeScale));
 }
 
 void QtMediaMusicPlayer::onMediaStatusChanged(QMediaPlayer::MediaStatus status)

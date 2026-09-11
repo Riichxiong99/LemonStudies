@@ -8,7 +8,8 @@ PomodoroTimer::PomodoroTimer(QObject *parent)
     m_timeRemaining(0),
     m_workDuration(0),
     m_breakDuration(0),
-    m_currentState(Idle)
+    m_currentState(Idle),
+    m_paused(false)
 {
     connect(m_timer, &QTimer::timeout, this, &PomodoroTimer::onTimerTick);
 }
@@ -19,6 +20,23 @@ int PomodoroTimer::timeRemaining() const {
 
 PomodoroTimer::State PomodoroTimer::currentState() const {
     return m_currentState;
+}
+
+bool PomodoroTimer::isPaused() const {
+    return m_paused;
+}
+
+// Only an explicit pause()/resume() announces itself. Transitions clear the
+// flag silently: a session on its way to Idle is not "resuming", and telling
+// listeners otherwise makes them start audio a moment before it is stopped.
+void PomodoroTimer::setPaused(bool nowPaused) {
+    if (m_paused == nowPaused)
+        return;
+    m_paused = nowPaused;
+    if (m_paused)
+        emit paused();
+    else
+        emit resumed();
 }
 
 void PomodoroTimer::startSession(int workDurationSeconds, int breakDurationSeconds) {
@@ -38,12 +56,14 @@ void PomodoroTimer::stop() {
 void PomodoroTimer::pause() {
     if (m_currentState == Working || m_currentState == OnBreak) {
         m_timer->stop();
+        setPaused(true);
     }
 }
 
 void PomodoroTimer::resume() {
     if ((m_currentState == Working || m_currentState == OnBreak) && m_timeRemaining > 0) {
         m_timer->start(1000);
+        setPaused(false);
     }
 }
 
@@ -62,6 +82,7 @@ void PomodoroTimer::onTimerTick() {
 }
 
 void PomodoroTimer::transitionToWorking() {
+    m_paused = false;
     m_currentState = Working;
     m_timeRemaining = m_workDuration;
     emit stateChanged(m_currentState);
@@ -70,6 +91,7 @@ void PomodoroTimer::transitionToWorking() {
 }
 
 void PomodoroTimer::transitionToBreak() {
+    m_paused = false;
     m_currentState = OnBreak;
     m_timeRemaining = m_breakDuration;
     emit stateChanged(m_currentState);
@@ -78,6 +100,7 @@ void PomodoroTimer::transitionToBreak() {
 }
 
 void PomodoroTimer::transitionToIdle() {
+    m_paused = false;
     m_currentState = Idle;
     emit stateChanged(m_currentState);
 }

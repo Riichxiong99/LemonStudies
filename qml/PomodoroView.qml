@@ -199,7 +199,6 @@ Page {
                 Material.background: "white"
                 onClicked: {
                     pomodoroTimer.pause()
-                    musicLinkManager.pause()
                 }
                 font.family: fredoka.name
                 layer.enabled: true
@@ -222,7 +221,6 @@ Page {
                 Material.background: "white"
                 onClicked: {
                     pomodoroTimer.resume()
-                    musicLinkManager.resume()
                 }
                 font.family: fredoka.name
 

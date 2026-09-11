@@ -18,6 +18,7 @@ public:
 
     int timeRemaining() const;
     State currentState() const;
+    bool isPaused() const;
 
     Q_INVOKABLE void startSession(int workDurationSeconds, int breakDurationSeconds);
     Q_INVOKABLE void stop();
@@ -31,6 +32,11 @@ public:
 signals:
     void timeRemainingChanged();
     void stateChanged(State newState);
+    // Distinct from stateChanged(): a paused session stays in Working/OnBreak,
+    // so anything that has to stop and start alongside the countdown - music,
+    // above all - has no state transition to react to without these.
+    void paused();
+    void resumed();
     void sessionEnded();
     void closePomodorotimer();
 
@@ -43,7 +49,9 @@ private:
     int m_workDuration;
     int m_breakDuration;
     State m_currentState;
+    bool m_paused;
 
+    void setPaused(bool nowPaused);
     void transitionToWorking();
     void transitionToBreak();
     void transitionToIdle();
