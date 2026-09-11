@@ -58,9 +58,22 @@ private slots:
     void testPlayerFailingSynchronouslyIsStillHandled();
     void testStoppingWhilePausedNeverResumesAudio();
 
+    void testPickingALinkResolvesItEagerly();
+    void testStartUsesThePrefetchedResultWithoutReResolving();
+    void testAStalePrefetchIsResolvedAgain();
+    void testAPrefetchKeepsItsEntriesWhenOnlyTheStreamFails();
+    void testAPrefetchedPlaylistStillAdvancesThroughItsEntries();
+    void testAFailedPrefetchIsSilentAndStartStillReportsIt();
+    void testPickingDuringASessionSwitchesRatherThanPrefetching();
+    void testStartAbandonsAnInFlightPrefetchAndStillPlays();
+    void testASupersededPrefetchIsCancelled();
+    void testClickingThroughLinksOnlyResolvesTheOneSettledOn();
+
 private:
     void clearDatabase();
-    void selectSingleLink(const QString &url);
+    void selectSingleLink(const QString &url, const QVector<QString> &entries = {});
+    void enablePrefetch();
+    MusicLinkManager::PlaybackTuning m_tuning;
     PomodoroTimer *m_pomodoro;
     MusicLinkManager *m_manager;
     FakeMusicLinkResolver *m_resolver;
@@ -102,9 +115,12 @@ void TestMusicLinkManager::init()
 
     // No test should sit through a real retry delay. healthyPlaybackMs keeps
     // its production default, so the give-up cap behaves as it does in the app.
-    MusicLinkManager::PlaybackTuning tuning;
-    tuning.retryDelayMs = 0;
-    m_manager->setPlaybackTuning(tuning);
+    m_tuning = MusicLinkManager::PlaybackTuning();
+    m_tuning.retryDelayMs = 0;
+    // Prefetching stays off unless a test asks for it, so picking a link never
+    // resolves anything behind an unrelated test's back.
+    m_tuning.prefetchDebounceMs = 60000;
+    m_manager->setPlaybackTuning(m_tuning);
 }
 
 void TestMusicLinkManager::cleanup()
@@ -127,14 +143,26 @@ void TestMusicLinkManager::clearDatabase()
     query.exec("UPDATE music_settings SET selected_link_id = -1, volume = 0.5 WHERE id = 1");
 }
 
-// Adds a single Music Link with the given url, selects it, and returns once
-// selection has taken effect - used by playback tests that don't care about
-// CRUD details, only about what happens once something is selected.
-void TestMusicLinkManager::selectSingleLink(const QString &url)
+// Adds a single Music Link, tells the resolver what it resolves to, and
+// selects it. Entries are configured before the pick, because picking is what
+// triggers prefetching - a test that set them afterwards would be relying on
+// the prefetch finding nothing.
+void TestMusicLinkManager::selectSingleLink(const QString &url, const QVector<QString> &entries)
 {
+    if (!entries.isEmpty())
+        m_resolver->entriesByUrl[url] = entries;
+
     m_manager->addMusicLink("Test Link", url);
     const int id = m_manager->data(m_manager->index(0, 0), MusicLinkManager::IdRole).toInt();
     m_manager->selectMusicLink(id);
+}
+
+// Prefetching is off by default across the suite; the tests that are about it
+// turn it on and then pump the event loop for the debounce.
+void TestMusicLinkManager::enablePrefetch()
+{
+    m_tuning.prefetchDebounceMs = 0;
+    m_manager->setPlaybackTuning(m_tuning);
 }
 
 void TestMusicLinkManager::testConstructor()
@@ -345,8 +373,7 @@ void TestMusicLinkManager::testNoSelectionMeansNoPlaybackOnWorking()
 
 void TestMusicLinkManager::testSingleEntryPlaysOnWorkingAndLoopsOnFinish()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
 
     m_pomodoro->startSession(60, 10);
 
@@ -364,8 +391,7 @@ void TestMusicLinkManager::testSingleEntryPlaysOnWorkingAndLoopsOnFinish()
 
 void TestMusicLinkManager::testSingleEntryRetryThenSilentError()
 {
-    selectSingleLink("https://youtube.com/watch?v=broken");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=broken"] = {"https://youtube.com/watch?v=broken"};
+    selectSingleLink("https://youtube.com/watch?v=broken", {"https://youtube.com/watch?v=broken"});
     // First attempt and the retry both fail - no other entry to fall back to.
     m_resolver->outcomesByEntry["https://youtube.com/watch?v=broken"] = {false, false};
 
@@ -382,8 +408,7 @@ void TestMusicLinkManager::testSingleEntryRetryThenSilentError()
 
 void TestMusicLinkManager::testPlaylistAdvancesToNextEntryOnFinish()
 {
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB", "entryC"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB", "entryC"});
 
     m_pomodoro->startSession(60, 10);
     QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA"}));
@@ -400,8 +425,7 @@ void TestMusicLinkManager::testPlaylistAdvancesToNextEntryOnFinish()
 
 void TestMusicLinkManager::testPlaylistLoopsBackToFirstEntry()
 {
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB"});
 
     m_pomodoro->startSession(60, 10);
     m_player->simulateFinished(); // -> entryB
@@ -414,8 +438,7 @@ void TestMusicLinkManager::testPlaylistLoopsBackToFirstEntry()
 
 void TestMusicLinkManager::testPlaylistSkipsBrokenMidEntry()
 {
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB", "entryC"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB", "entryC"});
     // entryB fails both its initial attempt and its retry.
     m_resolver->outcomesByEntry["entryB"] = {false, false};
 
@@ -433,8 +456,7 @@ void TestMusicLinkManager::testPlaylistSkipsBrokenMidEntry()
 
 void TestMusicLinkManager::testPlaylistGoesSilentWhenAllEntriesFail()
 {
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB"});
     m_resolver->outcomesByEntry["entryA"] = {false, false};
     m_resolver->outcomesByEntry["entryB"] = {false, false};
 
@@ -450,8 +472,7 @@ void TestMusicLinkManager::testPlaylistGoesSilentWhenAllEntriesFail()
 
 void TestMusicLinkManager::testPauseResumeStopMirrorToPlayer()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
 
     // Pausing the timer is the only thing the UI does - the music follows the
@@ -474,8 +495,7 @@ void TestMusicLinkManager::testPauseResumeStopMirrorToPlayer()
 
 void TestMusicLinkManager::testStopClearsPlayingState()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
 
@@ -487,8 +507,7 @@ void TestMusicLinkManager::testStopClearsPlayingState()
 
 void TestMusicLinkManager::testStopClearsPlaybackError()
 {
-    selectSingleLink("https://youtube.com/watch?v=broken");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=broken"] = {"https://youtube.com/watch?v=broken"};
+    selectSingleLink("https://youtube.com/watch?v=broken", {"https://youtube.com/watch?v=broken"});
     m_resolver->outcomesByEntry["https://youtube.com/watch?v=broken"] = {false, false};
 
     m_pomodoro->startSession(60, 10);
@@ -508,8 +527,7 @@ void TestMusicLinkManager::testPauseResumeAreNoOpsWhenNotPlaying()
     QCOMPARE(m_player->resumeCallCount, 0);
 
     // Same after a session ends (Idle): resume() must not resurrect stale audio.
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
     m_pomodoro->stop();
 
@@ -533,8 +551,7 @@ void TestMusicLinkManager::testRepeatedPlaybackErrorsEventuallyStopWithError()
 {
     // Resolves fine every time, but the stream itself never actually plays
     // (e.g. bad codec) - errorOccurred() fires instead of finished().
-    selectSingleLink("https://youtube.com/watch?v=unplayable");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=unplayable"] = {"https://youtube.com/watch?v=unplayable"};
+    selectSingleLink("https://youtube.com/watch?v=unplayable", {"https://youtube.com/watch?v=unplayable"});
 
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
@@ -553,8 +570,7 @@ void TestMusicLinkManager::testRepeatedPlaybackErrorsEventuallyStopWithError()
 void TestMusicLinkManager::testResolutionDoesNotBlockTheCaller()
 {
     m_resolver->deferred = true;
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
 
     m_pomodoro->startSession(60, 10);
 
@@ -570,8 +586,7 @@ void TestMusicLinkManager::testResolutionDoesNotBlockTheCaller()
 void TestMusicLinkManager::testStopWhileResolvingDropsTheLateAnswer()
 {
     m_resolver->deferred = true;
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
 
     m_pomodoro->startSession(60, 10);
     m_pomodoro->stop(); // Stop lands before the resolver has answered
@@ -587,12 +602,10 @@ void TestMusicLinkManager::testStopWhileResolvingDropsTheLateAnswer()
 
 void TestMusicLinkManager::testResolveRetryIsDelayedNotImmediate()
 {
-    MusicLinkManager::PlaybackTuning tuning;
-    tuning.retryDelayMs = 60000; // long enough that an immediate retry is obvious
-    m_manager->setPlaybackTuning(tuning);
+    m_tuning.retryDelayMs = 60000; // long enough that an immediate retry is obvious
+    m_manager->setPlaybackTuning(m_tuning);
 
-    selectSingleLink("https://youtube.com/watch?v=flaky");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=flaky"] = {"https://youtube.com/watch?v=flaky"};
+    selectSingleLink("https://youtube.com/watch?v=flaky", {"https://youtube.com/watch?v=flaky"});
     m_resolver->outcomesByEntry["https://youtube.com/watch?v=flaky"] = {false, false};
 
     m_pomodoro->startSession(60, 10);
@@ -606,8 +619,7 @@ void TestMusicLinkManager::testResolveRetryIsDelayedNotImmediate()
 
 void TestMusicLinkManager::testPausedSessionReportsNotPlaying()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
 
@@ -627,8 +639,7 @@ void TestMusicLinkManager::testPausedSessionReportsNotPlaying()
 
 void TestMusicLinkManager::testStreamErrorWhilePausedStaysSilentUntilResume()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
 
     m_pomodoro->pause();
@@ -671,8 +682,7 @@ void TestMusicLinkManager::testSelectingAnotherLinkMidSessionSwitchesImmediately
 
 void TestMusicLinkManager::testRemovingThePlayingLinkMidSessionStopsIt()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
 
@@ -689,13 +699,10 @@ void TestMusicLinkManager::testRecoveredErrorsDoNotAccumulateAcrossHealthyPlayba
     // Every entry plays happily for a while and then breaks, and every skip
     // recovers. That is a working session on a flaky network, not a stream
     // that never plays, so it must never hit the give-up cap.
-    MusicLinkManager::PlaybackTuning tuning;
-    tuning.retryDelayMs = 0;
-    tuning.healthyPlaybackMs = 0; // every entry counts as having played healthily
-    m_manager->setPlaybackTuning(tuning);
+    m_tuning.healthyPlaybackMs = 0; // every entry counts as having played healthily
+    m_manager->setPlaybackTuning(m_tuning);
 
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB", "entryC"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB", "entryC"});
 
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
@@ -710,8 +717,7 @@ void TestMusicLinkManager::testRecoveredErrorsDoNotAccumulateAcrossHealthyPlayba
 
 void TestMusicLinkManager::testLatePlaybackErrorAfterGivingUpStaysSilent()
 {
-    selectSingleLink("https://youtube.com/playlist?list=abc");
-    m_resolver->entriesByUrl["https://youtube.com/playlist?list=abc"] = {"entryA", "entryB"};
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB"});
     m_resolver->outcomesByEntry["entryA"] = {false, false};
     m_resolver->outcomesByEntry["entryB"] = {false, false};
 
@@ -730,8 +736,7 @@ void TestMusicLinkManager::testLatePlaybackErrorAfterGivingUpStaysSilent()
 
 void TestMusicLinkManager::testLatePlaybackErrorAfterStopShowsNoError()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
     QVERIFY(m_manager->isPlaying());
 
@@ -753,8 +758,7 @@ void TestMusicLinkManager::testPlayerFailingSynchronouslyIsStillHandled()
 {
     m_player->failSynchronouslyOnPlay = true;
 
-    selectSingleLink("https://youtube.com/watch?v=rejected");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=rejected"] = {"https://youtube.com/watch?v=rejected"};
+    selectSingleLink("https://youtube.com/watch?v=rejected", {"https://youtube.com/watch?v=rejected"});
 
     m_pomodoro->startSession(60, 10);
 
@@ -767,8 +771,7 @@ void TestMusicLinkManager::testPlayerFailingSynchronouslyIsStillHandled()
 // way out - the player would briefly play again before being stopped.
 void TestMusicLinkManager::testStoppingWhilePausedNeverResumesAudio()
 {
-    selectSingleLink("https://youtube.com/watch?v=solo");
-    m_resolver->entriesByUrl["https://youtube.com/watch?v=solo"] = {"https://youtube.com/watch?v=solo"};
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
     m_pomodoro->startSession(60, 10);
 
     m_pomodoro->pause();
@@ -779,6 +782,217 @@ void TestMusicLinkManager::testStoppingWhilePausedNeverResumesAudio()
     QCOMPARE(m_player->resumeCallCount, 0);
     QVERIFY(!m_manager->isPlaying());
     QCOMPARE(m_player->playedStreamUrls.count(), 1); // and nothing restarted
+}
+
+// Issue #1, story 21: picking a Music Link starts resolving it there and then,
+// so that pressing Start later doesn't have to wait on yt-dlp.
+void TestMusicLinkManager::testPickingALinkResolvesItEagerly()
+{
+    enablePrefetch();
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
+
+    QTRY_COMPARE(m_resolver->entriesRequestCount, 1);
+    QTRY_COMPARE(m_resolver->streamUrlRequestCount, 1);
+
+    // Resolving is all it does - nothing plays until a session starts.
+    QVERIFY(!m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls.count(), 0);
+}
+
+// The point of resolving at pick time: Start plays from what is already
+// resolved instead of asking yt-dlp all over again.
+void TestMusicLinkManager::testStartUsesThePrefetchedResultWithoutReResolving()
+{
+    enablePrefetch();
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
+    QTRY_COMPARE(m_resolver->streamUrlRequestCount, 1);
+
+    const int entriesAfterPick = m_resolver->entriesRequestCount;
+    const int streamsAfterPick = m_resolver->streamUrlRequestCount;
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"https://youtube.com/watch?v=solo"}));
+    QCOMPARE(m_resolver->entriesRequestCount, entriesAfterPick);
+    QCOMPARE(m_resolver->streamUrlRequestCount, streamsAfterPick);
+}
+
+// A resolved stream URL is a signed, expiring link. Inside the freshness window
+// it is used (the test above); past it, Start resolves again rather than
+// handing the player something already dead.
+void TestMusicLinkManager::testAStalePrefetchIsResolvedAgain()
+{
+    enablePrefetch();
+    m_tuning.prefetchFreshnessMs = 30; // small, but a real window - not zero
+    m_manager->setPlaybackTuning(m_tuning);
+
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
+    QTRY_COMPARE(m_resolver->streamUrlRequestCount, 1);
+    const int streamsAfterPick = m_resolver->streamUrlRequestCount;
+
+    QTest::qWait(60); // age it past the window
+
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(m_manager->isPlaying());
+    QVERIFY(m_resolver->streamUrlRequestCount > streamsAfterPick);
+}
+
+// Enumerating a playlist is the slow half. If only the stream half failed,
+// Start must keep the entry list rather than starting the whole job over.
+void TestMusicLinkManager::testAPrefetchKeepsItsEntriesWhenOnlyTheStreamFails()
+{
+    enablePrefetch();
+    m_resolver->outcomesByEntry["entryA"] = {false}; // the prefetch's stream attempt fails
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB"});
+    QTRY_COMPARE(m_resolver->streamUrlRequestCount, 1);
+
+    const int entriesAfterPick = m_resolver->entriesRequestCount;
+
+    m_pomodoro->startSession(60, 10);
+
+    QTRY_VERIFY(m_manager->isPlaying());
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryA"));
+    QCOMPARE(m_resolver->entriesRequestCount, entriesAfterPick); // enumeration reused
+    QVERIFY(m_resolver->streamUrlRequestCount > 1);              // only the stream redone
+}
+
+// A prefetch caches the whole entry list plus the first entry's stream. The
+// rest of the playlist must still resolve and sequence normally from there.
+void TestMusicLinkManager::testAPrefetchedPlaylistStillAdvancesThroughItsEntries()
+{
+    enablePrefetch();
+    selectSingleLink("https://youtube.com/playlist?list=abc", {"entryA", "entryB", "entryC"});
+    QTRY_COMPARE(m_resolver->streamUrlRequestCount, 1);
+
+    m_pomodoro->startSession(60, 10);
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"entryA"}));
+
+    m_player->simulateFinished();
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryB"));
+
+    m_player->simulateFinished();
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryC"));
+
+    m_player->simulateFinished();
+    QCOMPARE(m_manager->currentEntryUrl(), QString("entryA")); // loops back
+    QVERIFY(m_manager->isPlaying());
+}
+
+// Prefetching is speculative, so a Music Link that can't be resolved must not
+// put a red error next to the picker before the user has even pressed Start.
+void TestMusicLinkManager::testAFailedPrefetchIsSilentAndStartStillReportsIt()
+{
+    enablePrefetch();
+    selectSingleLink("https://youtube.com/playlist?list=dead"); // resolves to nothing
+    QTRY_COMPARE(m_resolver->entriesRequestCount, 1);
+
+    QVERIFY(m_manager->playbackError().isEmpty());
+    QVERIFY(!m_manager->isPlaying());
+
+    // Start makes the real attempt, and that one does report.
+    m_pomodoro->startSession(60, 10);
+
+    QVERIFY(!m_manager->isPlaying());
+    QVERIFY(!m_manager->playbackError().isEmpty());
+}
+
+// Mid-session, picking a link switches what is playing right now. Speculation
+// must not also fire: it would cancel the resolve the live session is waiting on.
+void TestMusicLinkManager::testPickingDuringASessionSwitchesRatherThanPrefetching()
+{
+    enablePrefetch();
+    m_manager->addMusicLink("First", "https://youtube.com/watch?v=first");
+    m_manager->addMusicLink("Second", "https://youtube.com/watch?v=second");
+    const int firstId = m_manager->data(m_manager->index(0, 0), MusicLinkManager::IdRole).toInt();
+    const int secondId = m_manager->data(m_manager->index(1, 0), MusicLinkManager::IdRole).toInt();
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=first"] = {"firstEntry"};
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=second"] = {"secondEntry"};
+
+    m_manager->selectMusicLink(firstId);
+    m_pomodoro->startSession(60, 10);
+    const int entriesBeforeSwitch = m_resolver->entriesRequestCount;
+
+    m_manager->selectMusicLink(secondId);
+
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"firstEntry", "secondEntry"}));
+    QCOMPARE(m_manager->currentEntryUrl(), QString("secondEntry"));
+    QVERIFY(m_manager->isPlaying());
+
+    // Exactly one new request - the switch itself - and nothing left queued
+    // that could fire a moment later.
+    QCOMPARE(m_resolver->entriesRequestCount, entriesBeforeSwitch + 1);
+    QTest::qWait(20);
+    QCOMPARE(m_resolver->entriesRequestCount, entriesBeforeSwitch + 1);
+}
+
+// Start can land while the prefetch is still out. The speculation is abandoned
+// and Start resolves for real - it must not inherit a half-filled cache.
+void TestMusicLinkManager::testStartAbandonsAnInFlightPrefetchAndStillPlays()
+{
+    enablePrefetch();
+    m_resolver->deferred = true;
+    selectSingleLink("https://youtube.com/watch?v=solo", {"https://youtube.com/watch?v=solo"});
+
+    m_pomodoro->startSession(60, 10); // prefetch has not answered yet
+
+    QTRY_VERIFY(m_manager->isPlaying());
+    QCOMPARE(m_player->playedStreamUrls, QStringList({"https://youtube.com/watch?v=solo"}));
+    QVERIFY(m_manager->playbackError().isEmpty());
+}
+
+// Abandoning speculation has to stop the process it started. Without this the
+// real resolver leaves an orphaned yt-dlp behind for every discarded pick.
+void TestMusicLinkManager::testASupersededPrefetchIsCancelled()
+{
+    enablePrefetch();
+    m_resolver->deferred = true;
+    m_manager->addMusicLink("First", "https://youtube.com/watch?v=first");
+    m_manager->addMusicLink("Second", "https://youtube.com/watch?v=second");
+    const int firstId = m_manager->data(m_manager->index(0, 0), MusicLinkManager::IdRole).toInt();
+    const int secondId = m_manager->data(m_manager->index(1, 0), MusicLinkManager::IdRole).toInt();
+
+    m_manager->selectMusicLink(firstId);
+    QTRY_COMPARE(m_resolver->entriesRequestCount, 1);
+    const int cancelsBeforeRepick = m_resolver->cancelCount;
+
+    m_manager->selectMusicLink(secondId);
+
+    QVERIFY(m_resolver->cancelCount > cancelsBeforeRepick);
+}
+
+// Comparing saved Music Links means clicking down the list. Each click must
+// not spawn (and then kill) its own yt-dlp process - only the pick that sticks
+// is worth resolving.
+void TestMusicLinkManager::testClickingThroughLinksOnlyResolvesTheOneSettledOn()
+{
+    m_tuning.prefetchDebounceMs = 30;
+    m_manager->setPlaybackTuning(m_tuning);
+
+    m_manager->addMusicLink("A", "https://youtube.com/watch?v=a");
+    m_manager->addMusicLink("B", "https://youtube.com/watch?v=b");
+    m_manager->addMusicLink("C", "https://youtube.com/watch?v=c");
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=a"] = {"aEntry"};
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=b"] = {"bEntry"};
+    m_resolver->entriesByUrl["https://youtube.com/watch?v=c"] = {"cEntry"};
+
+    // Three real clicks, each faster than the debounce but with the event loop
+    // running in between - otherwise nothing would have had a chance to fire
+    // and the debounce wouldn't be what collapses them.
+    for (int row = 0; row < 3; ++row) {
+        m_manager->selectMusicLink(m_manager->data(m_manager->index(row, 0), MusicLinkManager::IdRole).toInt());
+        QTest::qWait(5);
+    }
+
+    QTRY_COMPARE(m_resolver->entriesRequestCount, 1);
+    QTest::qWait(60);
+    QCOMPARE(m_resolver->entriesRequestCount, 1); // and no stragglers arrive later
+
+    // The one resolve was for the link actually settled on, and Start uses it.
+    m_pomodoro->startSession(60, 10);
+    QCOMPARE(m_manager->currentEntryUrl(), QString("cEntry"));
+    QCOMPARE(m_resolver->entriesRequestCount, 1);
 }
 
 QTEST_MAIN(TestMusicLinkManager)

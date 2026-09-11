@@ -2,6 +2,7 @@
 #define MUSICLINKMANAGER_H
 
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
@@ -55,6 +56,14 @@ public:
         // Only the latter accumulates toward the give-up cap, so an hour of
         // occasional recovered hiccups can't silently exhaust it.
         int healthyPlaybackMs = 30000;
+        // How long a prefetched stream URL stays worth using. yt-dlp hands back
+        // a signed, expiring link, so past this it is re-resolved rather than
+        // played and found dead.
+        int prefetchFreshnessMs = 300000;
+        // How long a selection has to settle before it is worth resolving.
+        // Clicking down a list of Music Links would otherwise spawn, and then
+        // kill, a yt-dlp process per click.
+        int prefetchDebounceMs = 400;
     };
 
     // resolver and player are required collaborators and the caller keeps
@@ -115,14 +124,29 @@ private:
         QString url;
     };
 
+    struct PrefetchedLink {
+        int linkId = -1;
+        QString musicLinkUrl;
+        QVector<QString> entries;
+        QString firstStreamUrl;
+        // Wall clock, not QElapsedTimer: the monotonic clock stops while the
+        // machine is suspended, so a link picked before closing the lid would
+        // still look fresh the next morning - exactly when its signed stream
+        // URL has expired.
+        QDateTime resolvedAt;
+    };
+
     void loadFromDatabase();
     void persistSettings();
 
+    QString selectedLinkUrl() const;
+
     void startPlayback();
     void stopPlayback();
-    // Drops all playback state and detaches from resolver and player. Leaves
-    // playbackError alone: the caller decides whether falling out of playback
-    // is worth telling the user about.
+    // Drops all playback state and detaches from resolver and player. Two
+    // deliberate exceptions: playbackError, because the caller decides whether
+    // falling out of playback is worth telling the user about; and the prefetch
+    // cache, because Start calls this immediately before going looking for it.
     void clearPlaybackState();
 
     // One pass over the playlist starting at startIndex, trying each entry at
@@ -134,6 +158,22 @@ private:
     void advanceSweepOrGiveUp();
     void skipToNextEntry();
     void playResolvedEntry(int index, const QString &streamUrl);
+
+    // Resolve a Music Link ahead of Start, so pressing Start doesn't wait on
+    // yt-dlp. Speculative throughout: a prefetch that fails is simply dropped,
+    // never surfaced, and Start falls back to resolving for real.
+    void prefetchSelectedLink();
+    void beginPrefetchRequest();
+    bool prefetchIsUsable() const;
+    // True while playback is waiting on a resolver answer of its own, which
+    // speculation must never cut across.
+    bool playbackResolveInFlight() const;
+    // Starts playback from a prefetched result, if one fits the current
+    // selection. Returns whether it did.
+    bool startFromPrefetch();
+    void onPrefetchEntriesReady(const QString &musicLinkUrl, const QVector<QString> &entries);
+    void onPrefetchStreamUrlReady(const QString &entryUrl, const QString &streamUrl);
+    void discardPrefetch();
 
     void setActive(bool active);
     void setPaused(bool paused);
@@ -153,6 +193,12 @@ private:
     // True from the moment a session starts working until it goes Idle,
     // spanning breaks - i.e. "this session still owns the music".
     bool m_sessionActive;
+
+    bool m_prefetchInFlight;
+    // Strands a debounce still counting down, or an answer to speculation
+    // nobody is waiting for any more.
+    int m_prefetchGeneration;
+    PrefetchedLink m_prefetch;
 
     QVector<QString> m_entries;
     int m_currentEntryIndex;

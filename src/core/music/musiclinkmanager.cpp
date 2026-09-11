@@ -14,6 +14,8 @@ MusicLinkManager::MusicLinkManager(PomodoroTimer *pomodoro, MusicLinkResolver *r
     m_resolver(resolver),
     m_player(player),
     m_sessionActive(false),
+    m_prefetchInFlight(false),
+    m_prefetchGeneration(0),
     m_currentEntryIndex(-1),
     m_resolveGeneration(0),
     m_pendingEntryIndex(-1),
@@ -155,8 +157,13 @@ void MusicLinkManager::selectMusicLink(int id)
     // A Music Link picked - or cleared, including by deleting it - during a
     // live session takes effect immediately. Otherwise the old one plays on
     // until Stop while the UI shows the new one as selected.
-    if (m_sessionActive)
+    if (m_sessionActive) {
         startPlayback();
+        return;
+    }
+
+    // Outside a session, resolve it now so that pressing Start is instant.
+    prefetchSelectedLink();
 }
 
 qreal MusicLinkManager::volume() const
@@ -320,14 +327,11 @@ void MusicLinkManager::startPlayback()
     if (m_selectedLinkId == -1 || !m_resolver)
         return;
 
-    QString selectedUrl;
-    for (const SavedMusicLink &link : m_links) {
-        if (link.id == m_selectedLinkId) {
-            selectedUrl = link.url;
-            break;
-        }
-    }
+    const QString selectedUrl = selectedLinkUrl();
     if (selectedUrl.isEmpty())
+        return;
+
+    if (startFromPrefetch())
         return;
 
     // Set the pending marker before asking: a resolver that answers
@@ -335,6 +339,15 @@ void MusicLinkManager::startPlayback()
     // inside this call, and must find a request it recognises.
     m_pendingMusicLinkUrl = selectedUrl;
     m_resolver->requestEntries(selectedUrl);
+}
+
+QString MusicLinkManager::selectedLinkUrl() const
+{
+    for (const SavedMusicLink &link : m_links) {
+        if (link.id == m_selectedLinkId)
+            return link.url;
+    }
+    return QString();
 }
 
 void MusicLinkManager::stopPlayback()
@@ -350,6 +363,11 @@ void MusicLinkManager::clearPlaybackState()
     // everything already cleared, where it is ignored, rather than acting on
     // half-cleared state.
     ++m_resolveGeneration;
+    // An in-flight prefetch dies with the cancel() below, but whatever it had
+    // already resolved is deliberately kept: Start is about to go looking for
+    // it. Only discardPrefetch() throws the cache away.
+    m_prefetchInFlight = false;
+    ++m_prefetchGeneration;
     m_entries.clear();
     m_currentEntryIndex = -1;
     m_pendingMusicLinkUrl.clear();
@@ -372,6 +390,11 @@ void MusicLinkManager::clearPlaybackState()
 
 void MusicLinkManager::onEntriesReady(const QString &musicLinkUrl, const QVector<QString> &entries)
 {
+    if (m_prefetchInFlight) {
+        onPrefetchEntriesReady(musicLinkUrl, entries);
+        return;
+    }
+
     if (m_pendingMusicLinkUrl.isEmpty() || musicLinkUrl != m_pendingMusicLinkUrl)
         return; // an answer to a question we've since stopped asking
 
@@ -420,6 +443,11 @@ void MusicLinkManager::retryPendingEntry()
 
 void MusicLinkManager::onStreamUrlReady(const QString &entryUrl, const QString &streamUrl)
 {
+    if (m_prefetchInFlight) {
+        onPrefetchStreamUrlReady(entryUrl, streamUrl);
+        return;
+    }
+
     if (m_pendingEntryIndex < 0 || m_pendingEntryIndex >= m_entries.size())
         return; // nothing outstanding; a late answer from a superseded sweep
     if (m_entries.at(m_pendingEntryIndex) != entryUrl)
@@ -486,6 +514,121 @@ void MusicLinkManager::skipToNextEntry()
     if (m_entries.isEmpty())
         return;
     beginResolveSweep((m_currentEntryIndex + 1) % m_entries.size());
+}
+
+bool MusicLinkManager::prefetchIsUsable() const
+{
+    if (m_prefetch.linkId != m_selectedLinkId || m_prefetch.entries.isEmpty())
+        return false;
+    if (!m_prefetch.resolvedAt.isValid())
+        return false;
+    return m_prefetch.resolvedAt.msecsTo(QDateTime::currentDateTimeUtc()) < m_tuning.prefetchFreshnessMs;
+}
+
+bool MusicLinkManager::playbackResolveInFlight() const
+{
+    return !m_pendingMusicLinkUrl.isEmpty() || m_pendingEntryIndex >= 0;
+}
+
+bool MusicLinkManager::startFromPrefetch()
+{
+    if (!prefetchIsUsable()) {
+        discardPrefetch();
+        return false;
+    }
+
+    m_entries = m_prefetch.entries;
+
+    // The stream URL is single-use - it is signed and expiring - but the entry
+    // list is not, so a Start soon after still skips the slow enumeration.
+    const QString streamUrl = m_prefetch.firstStreamUrl;
+    m_prefetch.firstStreamUrl.clear();
+
+    if (streamUrl.isEmpty()) {
+        // Only the cheap half was missing (or it failed on its own). Enumerating
+        // the playlist is the expensive part and it is already done, so this is
+        // still worth far more than starting over.
+        beginResolveSweep(0);
+        return true;
+    }
+
+    m_sweepStart = 0;
+    m_sweepTried = 0;
+    playResolvedEntry(0, streamUrl);
+    return true;
+}
+
+void MusicLinkManager::prefetchSelectedLink()
+{
+    discardPrefetch();
+
+    if (!m_resolver || m_selectedLinkId == -1)
+        return;
+
+    const QString url = selectedLinkUrl();
+    if (url.isEmpty())
+        return;
+
+    m_prefetch.linkId = m_selectedLinkId;
+    m_prefetch.musicLinkUrl = url;
+
+    // Let the selection settle before spending a process on it.
+    const int generation = m_prefetchGeneration;
+    QTimer::singleShot(m_tuning.prefetchDebounceMs, this, [this, generation]() {
+        if (generation != m_prefetchGeneration)
+            return;
+        beginPrefetchRequest();
+    });
+}
+
+void MusicLinkManager::beginPrefetchRequest()
+{
+    // Fires from a timer, so re-check rather than trusting what was true when
+    // it was scheduled. The generation counter should already have stranded
+    // this if playback claimed the resolver in the meantime; this is the
+    // backstop for that reasoning being wrong.
+    if (!m_resolver || m_prefetch.linkId != m_selectedLinkId || playbackResolveInFlight())
+        return;
+
+    m_prefetchInFlight = true;
+    m_resolver->requestEntries(m_prefetch.musicLinkUrl);
+}
+
+void MusicLinkManager::onPrefetchEntriesReady(const QString &musicLinkUrl, const QVector<QString> &entries)
+{
+    if (!m_resolver || musicLinkUrl != m_prefetch.musicLinkUrl || entries.isEmpty()) {
+        discardPrefetch();
+        return;
+    }
+
+    m_prefetch.entries = entries;
+    m_prefetch.resolvedAt = QDateTime::currentDateTimeUtc();
+    m_resolver->requestStreamUrl(entries.first());
+}
+
+void MusicLinkManager::onPrefetchStreamUrlReady(const QString &entryUrl, const QString &streamUrl)
+{
+    m_prefetchInFlight = false;
+
+    // A failed stream half is not worth discarding the entry list over - Start
+    // will resolve the first entry itself and keep the enumeration.
+    if (m_prefetch.entries.isEmpty() || entryUrl != m_prefetch.entries.first() || streamUrl.isEmpty())
+        return;
+
+    m_prefetch.firstStreamUrl = streamUrl;
+}
+
+void MusicLinkManager::discardPrefetch()
+{
+    ++m_prefetchGeneration; // strands a debounce still counting down
+
+    if (m_prefetchInFlight) {
+        m_prefetchInFlight = false;
+        if (m_resolver)
+            m_resolver->cancel();
+    }
+
+    m_prefetch = PrefetchedLink();
 }
 
 void MusicLinkManager::onEntryFinished()
