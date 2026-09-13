@@ -103,6 +103,7 @@ void MusicLinkManager::addMusicLink(const QString &label, const QString &url)
     m_links.append({newId, trimmedLabel, trimmedUrl});
     endInsertRows();
 
+    emit countChanged();
     emit musicLinkAdded();
 }
 
@@ -120,6 +121,7 @@ void MusicLinkManager::removeMusicLink(int index)
     m_links.removeAt(index);
     endRemoveRows();
 
+    emit countChanged();
     emit musicLinkRemoved();
 
     // Clearing the selection is what stops it playing, if it was the one
@@ -204,6 +206,8 @@ void MusicLinkManager::loadFromDatabase()
     m_volume = settings["volume"].toDouble();
 
     endResetModel();
+
+    emit countChanged();
 
     // A previously-selected link may have been removed since the last run
     // (e.g. an interrupted shutdown); don't point at a link that no longer exists.

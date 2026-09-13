@@ -68,6 +68,7 @@ private slots:
     void testStartAbandonsAnInFlightPrefetchAndStillPlays();
     void testASupersededPrefetchIsCancelled();
     void testClickingThroughLinksOnlyResolvesTheOneSettledOn();
+    void testCountIsBindableFromQml();
 
 private:
     void clearDatabase();
@@ -993,6 +994,30 @@ void TestMusicLinkManager::testClickingThroughLinksOnlyResolvesTheOneSettledOn()
     m_pomodoro->startSession(60, 10);
     QCOMPARE(m_manager->currentEntryUrl(), QString("cEntry"));
     QCOMPARE(m_resolver->entriesRequestCount, 1);
+}
+
+// PomodoroView binds `musicLinkManager.count` to decide whether to show the
+// saved-links list or the "nothing saved yet" message. Without a real property,
+// that expression resolves to the method object in QML: both comparisons come
+// out false and neither ever renders, however many links are saved.
+void TestMusicLinkManager::testCountIsBindableFromQml()
+{
+    QVERIFY(m_manager->property("count").isValid());
+    QCOMPARE(m_manager->property("count").toInt(), 0);
+
+    QSignalSpy countSpy(m_manager, &MusicLinkManager::countChanged);
+
+    m_manager->addMusicLink("Lo-fi beats", "https://youtube.com/watch?v=1");
+    QCOMPARE(m_manager->property("count").toInt(), 1);
+    QCOMPARE(countSpy.count(), 1);
+
+    m_manager->addMusicLink("Piano focus", "https://youtube.com/watch?v=2");
+    QCOMPARE(m_manager->property("count").toInt(), 2);
+    QCOMPARE(countSpy.count(), 2);
+
+    m_manager->removeMusicLink(0);
+    QCOMPARE(m_manager->property("count").toInt(), 1);
+    QCOMPARE(countSpy.count(), 3);
 }
 
 QTEST_MAIN(TestMusicLinkManager)

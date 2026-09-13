@@ -37,6 +37,11 @@ class MusicLinkManager : public QAbstractListModel
 {
     Q_OBJECT
 
+    // A real property, not just the Q_INVOKABLE below: PomodoroView binds this
+    // to choose between the saved-links list and the empty-state message, and a
+    // bare method would resolve to the function object there, leaving both
+    // hidden no matter how many links exist.
+    Q_PROPERTY(int count READ count NOTIFY countChanged)
     Q_PROPERTY(int selectedLinkId READ selectedLinkId WRITE selectMusicLink NOTIFY selectedLinkIdChanged)
     Q_PROPERTY(qreal volume READ volume WRITE setVolume NOTIFY volumeChanged)
     Q_PROPERTY(bool playing READ isPlaying NOTIFY playingChanged)
@@ -102,6 +107,7 @@ public:
 signals:
     void musicLinkAdded();
     void musicLinkRemoved();
+    void countChanged();
     void selectedLinkIdChanged();
     void volumeChanged();
     void playingChanged();
